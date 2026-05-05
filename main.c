@@ -1,0 +1,643 @@
+/*
+ * MAIN Generated Driver File
+ * 
+ * @file main.c
+ * 
+ * @defgroup main MAIN
+ * 
+ * @brief This is the generated driver implementation file for the MAIN driver.
+ *
+ * @version MAIN Driver Version 1.0.2
+ *
+ * @version Package Version: 3.1.2
+ */
+
+/*
+? [2026] Microchip Technology Inc. and its subsidiaries.
+
+    Subject to your compliance with these terms, you may use Microchip 
+    software and any derivatives exclusively with Microchip products. 
+    You are responsible for complying with 3rd party license terms  
+    applicable to your use of 3rd party software (including open source  
+    software) that may accompany Microchip software. SOFTWARE IS ?AS IS.? 
+    NO WARRANTIES, WHETHER EXPRESS, IMPLIED OR STATUTORY, APPLY TO THIS 
+    SOFTWARE, INCLUDING ANY IMPLIED WARRANTIES OF NON-INFRINGEMENT,  
+    MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE. IN NO EVENT 
+    WILL MICROCHIP BE LIABLE FOR ANY INDIRECT, SPECIAL, PUNITIVE, 
+    INCIDENTAL OR CONSEQUENTIAL LOSS, DAMAGE, COST OR EXPENSE OF ANY 
+    KIND WHATSOEVER RELATED TO THE SOFTWARE, HOWEVER CAUSED, EVEN IF 
+    MICROCHIP HAS BEEN ADVISED OF THE POSSIBILITY OR THE DAMAGES ARE 
+    FORESEEABLE. TO THE FULLEST EXTENT ALLOWED BY LAW, MICROCHIP?S 
+    TOTAL LIABILITY ON ALL CLAIMS RELATED TO THE SOFTWARE WILL NOT 
+    EXCEED AMOUNT OF FEES, IF ANY, YOU PAID DIRECTLY TO MICROCHIP FOR 
+    THIS SOFTWARE.
+ */
+#include "mcc_generated_files/system/system.h"
+
+/* SAF addresses
+ * PIC16F15313: 2048 program words total, SAF = last 128 words.
+ * SAF start = 2048 - 128 = 1920 = 0x0780.
+ * Row size = 32 words; 0x0780 is row-aligned (0x0780 / 32 = 0x3C).
+ */
+#define SAF_ROW_ADDR        0x07E0U         /* Row-aligned start of SAF         */
+#define SAF_ADDR_MIN        (SAF_ROW_ADDR + 0U)
+#define SAF_ADDR_CENTER     (SAF_ROW_ADDR + 1U)
+#define SAF_ADDR_MAX        (SAF_ROW_ADDR + 2U)
+#define SAF_ADDR_DAC_MIN    (SAF_ROW_ADDR + 3U)
+#define SAF_ADDR_DAC_MAX    (SAF_ROW_ADDR + 4U)
+#define SAF_ROW_SIZE        32U             /* Words per flash erase row        */
+
+/* Default calibration (used when SAF is blank / out of range) */
+#define DEFAULT_MIN_VOL     0U
+#define DEFAULT_CENTER_VOL  511U
+#define DEFAULT_MAX_VOL     1023U
+
+/* DAC出力の上限・下限(8bit 0-255) */
+#define DEFAULT_DAC_MIN     47U    // 18.43%
+#define DEFAULT_DAC_MAX    172U    // 67.45%
+#define DAC_ADJUSTMENT_RANGE    5U 
+#define DAC_ADJUSTMENT_MIN_MIN  (DEFAULT_DAC_MIN - DAC_ADJUSTMENT_RANGE)
+#define DAC_ADJUSTMENT_MIN_MAX  (DEFAULT_DAC_MIN + DAC_ADJUSTMENT_RANGE)
+#define DAC_ADJUSTMENT_MAX_MIN  (DEFAULT_DAC_MAX - DAC_ADJUSTMENT_RANGE)
+#define DAC_ADJUSTMENT_MAX_MAX  (DEFAULT_DAC_MAX + DAC_ADJUSTMENT_RANGE)
+
+/* ADC limits */
+#define ADC_MAX         1023U
+
+/*
+ * ADC noise threshold for LED control:
+ *   ADC values within +/-ADC_NOISE_THRESHOLD of the previous reading
+ *   are treated as stable (no LED update).
+ */
+#define ADC_NOISE_THRESHOLD  3U
+
+/* ADC上限・下限から不感とする範囲 */
+#define NON_PERCEPTUAL_THRESHOLD    6U
+
+/* ADJUST校正の有効範囲: 最大-最小がこの値未満の場合はエラー */
+#define ADJUST_MIN_RANGE            512U
+
+/* Timing: TMR0 fires every 2 ms */
+#define TICKS_500MS     250U            /* 500 ms / 2 ms per tick           */
+#define TICKS_1S        500U            /* 1 s   / 2 ms per tick           */
+
+/*
+ * Global
+ */
+volatile uint16_t g_minVoltage; /* Min ADC value (persisted in SAF) */
+volatile uint16_t g_centerVoltage; /* Center ADC value (SAF)           */
+volatile uint16_t g_maxVoltage; /* Max ADC value (SAF)              */
+volatile uint8_t g_dacMinValue;
+volatile uint8_t g_dacMaxValue;
+volatile uint16_t g_adjustPressCount; /* Consecutive 2 ms ticks RA4 low   */
+volatile uint16_t g_ledTimer; /* LED on-time countdown (ticks)    */
+volatile uint16_t g_adcPrevValue; /* Previous ADC value for LED logic */
+volatile bool g_adc_exec = false;
+volatile bool g_adjustFlag = false; /* Set when ADJUST held >= 1 s      */
+volatile bool g_adcStartFlag = false;
+volatile bool g_adcDoneFlag = false;
+
+/*
+    Main application
+ */
+
+/*
+ * 指定時間LEDを点灯する
+ *   100ms/loop, 10で1秒
+ */
+static bool solid_led(uint8_t loop) {
+    bool adj_hold = true;
+    IO_RA2_SetHigh();
+    while (loop--) {
+        if(IO_RA5_GetValue()){
+            adj_hold = false;
+        }
+        CLRWDT();
+        __delay_ms(100);
+    }
+    IO_RA2_SetLow();
+    return adj_hold;
+}
+
+/*
+ * 指定時間LEDを点滅させる
+ */
+static bool blink_led(uint8_t interval_loop, uint8_t loop) {
+    bool adj_hold = true;
+    for (uint8_t i = 0U; i < loop; i++) {
+        IO_RA2_Toggle();
+        if(IO_RA5_GetValue()){
+            adj_hold = false;
+        }
+        for (uint8_t j = 0U; j < interval_loop; j++) {
+            CLRWDT();
+            __delay_ms(100);
+        }
+    }
+    IO_RA2_SetLow();
+    return adj_hold;
+}
+
+/*
+ * 数字の桁毎にLEDを点滅させる
+ */
+static bool blink_number_led(uint8_t number) {
+    uint8_t adj_count = 0;
+
+    uint8_t loop;
+    // 100の位
+    loop = number / 100;
+    for (uint8_t i = 0; i < loop; i++) {
+        if (!IO_RA5_GetValue() && adj_count <= 10) {
+            adj_count++;
+            if (adj_count >= 2) {
+                IO_RA2_SetLow();
+                return true;
+            }
+        }
+        blink_led(2U, 2U);
+        number -= 100;
+    }
+    __delay_ms(500);
+    // 10の位
+    loop = number / 10;
+    for (uint8_t i = 0; i < loop; i++) {
+        if (!IO_RA5_GetValue() && adj_count <= 10) {
+            adj_count++;
+            if (adj_count >= 2) {
+                IO_RA2_SetLow();
+                return true;
+            }
+        }
+        blink_led(2U, 2U);
+        number -= 10;
+    }
+    __delay_ms(500);
+    loop = number;
+    for (uint8_t i = 0; i < loop; i++) {
+        if (!IO_RA5_GetValue() && adj_count <= 10) {
+            adj_count++;
+            if (adj_count >= 2) {
+                IO_RA2_SetLow();
+                return true;
+            }
+        }
+        blink_led(2U, 2U);
+        number -= 10;
+    }
+
+    return false;
+}
+
+/*
+ * SAFからボリューム補正値を取得する
+ */
+static void load_correction_values() {
+
+    // SAFから補正値の取得
+    g_minVoltage = (uint16_t) FLASH_Read(SAF_ADDR_MIN);
+    g_centerVoltage = (uint16_t) FLASH_Read(SAF_ADDR_CENTER);
+    g_maxVoltage = (uint16_t) FLASH_Read(SAF_ADDR_MAX);
+    g_dacMinValue = (uint8_t) FLASH_Read(SAF_ADDR_DAC_MIN);
+    g_dacMaxValue = (uint8_t) FLASH_Read(SAF_ADDR_DAC_MAX);
+
+    /* ボリューム補正値が範囲内かチェックする */
+    if (g_minVoltage < g_centerVoltage &&
+            g_centerVoltage < g_maxVoltage &&
+            g_maxVoltage <= ADC_MAX &&
+            (g_maxVoltage - g_minVoltage) >= ADJUST_MIN_RANGE) {
+        solid_led(6U);
+    } else {
+        blink_led(1U, 6U);
+        // 取得値が範囲外の場合はデフォルト値を採用する
+        g_minVoltage = DEFAULT_MIN_VOL;
+        g_centerVoltage = DEFAULT_CENTER_VOL;
+        g_maxVoltage = DEFAULT_MAX_VOL;
+    }
+
+    // DAC最小値チェック
+    if (g_dacMinValue >= DAC_ADJUSTMENT_MIN_MIN &&
+            g_dacMinValue <= DAC_ADJUSTMENT_MIN_MAX) {
+        solid_led(6U);
+    } else {
+        blink_led(1U, 6U);
+        g_dacMinValue = DEFAULT_DAC_MIN;
+    }
+
+    // DAC最大値チェック
+    if (g_dacMaxValue >= DAC_ADJUSTMENT_MAX_MIN &&
+            g_dacMaxValue <= DAC_ADJUSTMENT_MAX_MAX) {
+        solid_led(6U);
+    } else {
+        blink_led(1U, 6U);
+        g_dacMaxValue = DEFAULT_DAC_MAX;
+    }
+
+}
+
+/*
+ * SAFにボリューム補正値を保存する
+ */
+static bool save_correction_values() {
+    flash_data_t buf[5];
+    buf[0] = g_minVoltage;
+    buf[1] = g_centerVoltage;
+    buf[2] = g_maxVoltage;
+    buf[3] = g_dacMinValue;
+    buf[4] = g_dacMaxValue;
+    uint8_t buf_length = 5U;
+
+    // 消去・書き込みを行う前にアンロックキーをセットする
+    NVM_UnlockKeySet(UNLOCK_KEY);
+
+    if (FLASH_PageErase(SAF_ROW_ADDR) != NVM_OK) {
+        // 削除失敗 100ms/1000ms
+        blink_led(1U, 10U);
+        return false;
+    }
+    if (FLASH_RowWrite(SAF_ROW_ADDR, buf, buf_length) != NVM_OK) {
+        // 書込失敗 100ms/2500ms
+        blink_led(1U, 25U);
+        return false;
+    }
+    flash_address_t adr = SAF_ROW_ADDR;
+    for (uint8_t i = 0; i < buf_length; i++, adr++) {
+        if (FLASH_Read(adr) != buf[i]) {
+            // 検証失敗 100ms/5000ms
+            blink_led(1U, 50U);
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/* 
+ * ADC即時実行
+ */
+static uint16_t adc_exec() {
+    ADC_ConversionDoneInterruptDisable();
+    ADC_ConversionDoneInterruptFlagClear();
+
+    ADC_ConversionStart();
+    while (!ADC_IsConversionDone()) {
+        CLRWDT();
+    };
+    uint16_t result = (uint16_t) ADC_ConversionResultGet();
+
+    ADC_ConversionDoneInterruptEnable();
+
+    return result;
+}
+
+/**
+ * ADCの結果をDACの出力値に変換する
+ *
+ * @param adcVal  Raw ADC value (0-1023).
+ * @return        DAC value as a 8-bit value (0-255).
+ */
+static uint8_t convert_adc_to_dac(uint16_t adcVal) {
+
+    // 上限/下限の校正値に不感範囲を反映して最大値と最小値を決定する
+    uint16_t minVolt = g_minVoltage + NON_PERCEPTUAL_THRESHOLD;
+    uint16_t maxVolt = g_maxVoltage - NON_PERCEPTUAL_THRESHOLD;
+    uint8_t dac_range = g_dacMaxValue - g_dacMinValue;
+
+    // 最小値以下はゼロ
+    if (adcVal <= minVolt)
+        return 0;
+    // 最大値超えは最大デューティー
+    if (adcVal > maxVolt)
+        return g_dacMaxValue;
+
+    // 電圧範囲をPWMデューティー範囲に変換
+    uint16_t voltDiff = adcVal - minVolt;
+    uint16_t voltRange = maxVolt - minVolt;
+
+    // 比例計算 + 四捨五入のための補正 (+ voltRange / 2)
+    // 最大値: (voltDiff * DAC_RANGE) + (voltRange / 2)
+    //         <= (1023 * 255) + (1023 / 2) = 261376 (32bit範囲内)
+    uint32_t numerator = (uint32_t) voltDiff * dac_range + (voltRange >> 1);
+    uint16_t duty = g_dacMinValue + (uint16_t) (numerator / voltRange);
+
+    if (duty > g_dacMaxValue) {
+        duty = g_dacMaxValue;
+    }
+
+    return (uint8_t) duty;
+
+}
+
+/*
+ * 電源ON時にDACの出力値を徐々に大きくする
+ */
+static void set_dac_value_fade(uint8_t value) {
+    for (uint8_t i = 0; i <= value; i++) {
+        DAC1_SetOutput(i);
+        __delay_ms(4);
+    }
+}
+
+/*
+ *  ADC変換完了割り込み
+ */
+static void adc_isc() {
+
+    g_adcDoneFlag = true;
+
+}
+
+/*
+ * Timer0割り込み
+ * 
+ * 2ms(500KHz)毎に呼び出されてADCの起動とADJUSTピンの判定を行う
+ * 
+ */
+static void timer0_isc() {
+
+    // ADJUST_PINが一秒間押された場合、更正モードを有効にする
+    if (!IO_RA5_GetValue()) {
+        if (!g_adjustFlag) {
+            if (g_adjustPressCount < TICKS_1S) {
+                g_adjustPressCount++;
+            } else {
+                // ADC起動中ならADJUSTフラグを立てない
+                if (!g_adc_exec) {
+                    g_adjustFlag = true;
+                    return;
+                }
+            }
+        } else {
+            g_adjustPressCount = 0;
+        }
+    }
+
+    // ADC起動する
+    if (!g_adjustFlag && !g_adc_exec) {
+        g_adc_exec = true;
+        g_adcStartFlag = true;
+    }
+
+    // LED点灯後0.5秒でLEDを消灯する
+    if (g_ledTimer > 0U) {
+        g_ledTimer--;
+        if (!g_ledTimer) {
+            IO_RA2_SetLow();
+        }
+    }
+
+}
+
+static bool adjust_mode_adc(void) {
+
+    uint16_t newMin, newCenter, newMax;
+
+    /* ----- Phase 1: capture center voltage -------------------------- */
+
+    /* Blink LED at 0.5 s intervals for 5 s (10 half-periods) */
+    if(blink_led(5U, 6U)){
+        // 補正値をリセットして再起動する
+        g_minVoltage = 0x3FFU;
+        g_centerVoltage = 0x3FFU;
+        g_maxVoltage = 0x3FFU;
+        g_dacMinValue = 0xFFU;
+        g_dacMaxValue = 0xFFU;
+        save_correction_values();
+        __delay_ms(100);
+        RESET();
+        return false;
+    }
+    blink_led(5U, 4U);
+    newCenter = adc_exec();
+
+    /* LED solid for 1 s                      */
+    solid_led(10U);
+
+    /* ----- Phase 2: capture maximum voltage ----------------------------- */
+
+    /* Blink LED at 0.5 s intervals for 5 s (10 half-periods) */
+    blink_led(5U, 10U);
+    newMax = adc_exec();
+
+    /* LED solid for 1 s                      */
+    solid_led(10U);
+
+    /* ----- Phase 3: capture minimum voltage -------------------------- */
+
+    /* Blink LED at 0.5 s intervals for 5 s */
+    blink_led(5U, 10U);
+    newMin = adc_exec();
+
+    /* ----- Validate calibration range --------------------------------- */
+    if (newMin < newCenter && newCenter < newMax && (newMax - newMin) >= ADJUST_MIN_RANGE) {
+        /* Valid: commit captured values to globals and persist to SAF    */
+        g_minVoltage = newMin;
+        g_centerVoltage = newCenter;
+        g_maxVoltage = newMax;
+        return true;
+
+    } else {
+        // 最小＜中間＜最大になっていない
+        // 2秒間点滅
+        blink_led(1U, 20U);
+    }
+    return false;
+}
+
+static uint8_t adjust_mode_dac(uint8_t current_value, uint8_t range_min, uint8_t range_max) {
+    // 現在地を2回表示
+    blink_number_led(current_value);
+    __delay_ms(1000);
+    blink_number_led(current_value);
+
+    uint8_t adc_value = (uint8_t) (adc_exec() >> 2);
+    if (adc_value < 0x55U || adc_value > 0xAAU) {
+        // adcの結果が中央値以外ならここで終了
+
+        // 2秒間点滅
+        blink_led(1U, 20U);
+        return 0;
+    }
+
+    uint8_t new_value = current_value;
+    uint8_t noupdate_count = 0;
+    uint8_t adc_prev_value = 0;
+
+    // 1sec wait
+    __delay_ms(1000);
+
+    while (true) {
+
+        // 現在値を出力
+        if (blink_number_led(new_value)) {
+            return new_value;
+        }
+
+        // adc結果取得
+        adc_value = (uint8_t) (adc_exec() >> 2);
+        if (adc_value < 0x55U) {
+            // デクリメント
+            if (new_value > range_min) {
+                new_value--;
+            }
+            noupdate_count = 0;
+        } else if (adc_value > 0xAAU) {
+            // インクリメント
+            if (new_value < range_max) {
+                new_value++;
+            }
+            noupdate_count = 0;
+        } else {
+            noupdate_count++;
+        }
+
+        __delay_ms(1000);
+
+        // 10回連続で値が変更されなかったら変更せずに終了
+        if (noupdate_count > 10) {
+            // 2秒間点滅
+            blink_led(1U, 20U);
+            return 0;
+        }
+
+    }
+
+}
+
+static bool adjust_mode_dac_min(void) {
+    uint8_t new_value = adjust_mode_dac(g_dacMinValue, DAC_ADJUSTMENT_MIN_MIN, DAC_ADJUSTMENT_MIN_MAX);
+    if (new_value) {
+        g_dacMinValue = new_value;
+        return true;
+    }
+    return false;
+}
+
+static bool adjust_mode_dac_max(void) {
+    uint8_t new_value = adjust_mode_dac(g_dacMaxValue, DAC_ADJUSTMENT_MAX_MIN, DAC_ADJUSTMENT_MAX_MAX);
+    if (new_value) {
+        g_dacMaxValue = new_value;
+        return true;
+    }
+    return false;
+}
+
+/*
+ * ADJUSTモード
+ */
+static void adjust_mode_run(void) {
+
+    DAC1_SetOutput(0U);
+
+    IO_RA2_SetLow();
+    //    ADC_ConversionDoneInterruptDisable();
+
+
+    uint8_t adc_value = (uint8_t) (adc_exec() >> 2);
+    bool is_save = false;
+    if (adc_value <= 0x55U) {
+
+        is_save = adjust_mode_dac_min();
+
+    } else if (adc_value <= 0xAAU) {
+
+        is_save = adjust_mode_adc();
+
+    } else {
+
+        is_save = adjust_mode_dac_max();
+
+    }
+
+    if (is_save) {
+        if (save_correction_values()) {
+            /* Success indicator: LED solid for 2 s                          */
+            solid_led(20U);
+        }
+    }
+
+    //    ADC_ConversionDoneInterruptEnable();
+
+    g_adjustPressCount = 0U;
+    g_adjustFlag = false;
+
+}
+
+int main(void) {
+
+    // 初期化
+    SYSTEM_Initialize();
+
+    // 割り込みコールバック登録
+    ADC_ConversionDoneCallbackRegister(adc_isc);
+    TMR0_PeriodMatchCallbackRegister(timer0_isc);
+
+    // SAFから補正値を取得する。
+    load_correction_values();
+
+    // 起動時のボリューム位置取得を取得してDAC出力
+    ADC_ConversionStart();
+    while (!ADC_IsConversionDone()) {
+        CLRWDT();
+    }
+    g_adcPrevValue = (uint16_t) ADC_ConversionResultGet();
+    set_dac_value_fade(convert_adc_to_dac(g_adcPrevValue));
+
+    // Enable the Global Interrupts 
+    INTERRUPT_GlobalInterruptEnable();
+
+    // Disable the Global Interrupts 
+    //INTERRUPT_GlobalInterruptDisable(); 
+
+    // Enable the Peripheral Interrupts 
+    INTERRUPT_PeripheralInterruptEnable();
+
+    // Disable the Peripheral Interrupts 
+    //INTERRUPT_PeripheralInterruptDisable(); 
+
+    //IO_RA2_SetLow();
+
+    while (1) {
+
+        CLRWDT();
+
+        if (g_adcStartFlag) {
+            INTERRUPT_GlobalInterruptDisable();
+            ADC_ConversionStart();
+            g_adcStartFlag = false;
+            INTERRUPT_GlobalInterruptEnable();
+        }
+
+        if (g_adcDoneFlag) {
+            INTERRUPT_GlobalInterruptDisable();
+
+            // ADC結果を取得してDACの出力値に変換
+            uint16_t adc_value = (uint16_t) ADC_ConversionResultGet();
+            uint8_t dac_value = convert_adc_to_dac(adc_value);
+
+            DAC1_SetOutput(dac_value);
+
+            uint16_t adc_diff = (adc_value > g_adcPrevValue)
+                    ? (adc_value - g_adcPrevValue)
+                    : (g_adcPrevValue - adc_value);
+
+            if (adc_diff > ADC_NOISE_THRESHOLD) {
+                IO_RA2_SetHigh();
+                g_ledTimer = TICKS_500MS;
+                g_adcPrevValue = adc_value;
+            }
+
+            g_adc_exec = false;
+            g_adcDoneFlag = false;
+            INTERRUPT_GlobalInterruptEnable();
+        }
+
+        // 更正モード
+        if (g_adjustFlag) {
+            INTERRUPT_GlobalInterruptDisable();
+            adjust_mode_run();
+            INTERRUPT_GlobalInterruptEnable();
+        }
+
+    }
+}
