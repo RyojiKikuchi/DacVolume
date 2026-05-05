@@ -5,7 +5,7 @@
  * 
  * @defgroup main MAIN
  * 
- * @brief This is the generated driver implementation file for the MAIN driver.
+ * @brief DacVolume - PIC16F13113 Firmware
  *
  * @version MAIN Driver Version 1.0.2
  *
@@ -34,10 +34,23 @@
  */
 #include "mcc_generated_files/system/system.h"
 
+/*
+ * ADCの入力を変換してDACに出力する
+ * 
+ * Pin assignments:
+ *   RA0 : Vout   (DAC1OUT1)
+ *   RA1 : Vrf+   (VREF+/DAC1REF0+)
+ *   RA2 : LED    (RA2)
+ *   RA3 : MCLR
+ *   RA4 : ADJUST (RA4) internal pullup
+ *   RA5 : ADC In (ANA5)
+ */
+
 /* SAF addresses
- * PIC16F15313: 2048 program words total, SAF = last 128 words.
+ * PIC16F13113: 2048 program words total, SAF = last 128 words.
  * SAF start = 2048 - 128 = 1920 = 0x0780.
  * Row size = 32 words; 0x0780 is row-aligned (0x0780 / 32 = 0x3C).
+ * Row Addresses 0x780, 0x7A0, 0x7C0, 0x7E0
  */
 #define SAF_ROW_ADDR        0x07E0U         /* Row-aligned start of SAF         */
 #define SAF_ADDR_MIN        (SAF_ROW_ADDR + 0U)
@@ -47,12 +60,13 @@
 #define SAF_ADDR_DAC_MAX    (SAF_ROW_ADDR + 4U)
 #define SAF_ROW_SIZE        32U             /* Words per flash erase row        */
 
-/* Default calibration (used when SAF is blank / out of range) */
-#define DEFAULT_MIN_VOL     0U
-#define DEFAULT_CENTER_VOL  511U
-#define DEFAULT_MAX_VOL     1023U
+/* ADC校正値がSAFに記録されていない場合のデフォルト値(10bit) */
+#define DEFAULT_ADC_MIN_VOL     0U
+#define DEFAULT_ADC_CENTER_VOL  511U
+#define DEFAULT_ADC_MAX_VOL     1023U
 
-/* DAC出力の上限・下限(8bit 0-255) */
+/* DAC校正値がSAFに記録されていない場合のデフォルト値(8bit) 
+ * DAC出力範囲の上限・下限及び調整範囲 */
 #define DEFAULT_DAC_MIN     47U    // 18.43%
 #define DEFAULT_DAC_MAX    172U    // 67.45%
 #define DAC_ADJUSTMENT_RANGE    5U 
@@ -61,17 +75,17 @@
 #define DAC_ADJUSTMENT_MAX_MIN  (DEFAULT_DAC_MAX - DAC_ADJUSTMENT_RANGE)
 #define DAC_ADJUSTMENT_MAX_MAX  (DEFAULT_DAC_MAX + DAC_ADJUSTMENT_RANGE)
 
-/* ADC limits */
-#define ADC_MAX         1023U
 
 /*
- * ADC noise threshold for LED control:
- *   ADC values within +/-ADC_NOISE_THRESHOLD of the previous reading
- *   are treated as stable (no LED update).
+ * ADC取得値ノイズ判定範囲
+ *   ADCの前回取得値と比較して変動が上下にこの範囲内ならLEDを点灯しない
+ *   LEDの判定にのみ使用して、DAC出力には反映しない
  */
 #define ADC_NOISE_THRESHOLD  3U
 
-/* ADC上限・下限から不感とする範囲 */
+/* ADC上限・下限から不感とする範囲
+ * この範囲外の場合はDACの出力を0若しくは最大値とする
+ *  */
 #define NON_PERCEPTUAL_THRESHOLD    6U
 
 /* ADJUST校正の有効範囲: 最大-最小がこの値未満の場合はエラー */
@@ -84,17 +98,26 @@
 /*
  * Global
  */
+/* ADC校正値 */
 volatile uint16_t g_minVoltage; /* Min ADC value (persisted in SAF) */
 volatile uint16_t g_centerVoltage; /* Center ADC value (SAF)           */
 volatile uint16_t g_maxVoltage; /* Max ADC value (SAF)              */
+/* DAC校正値 */
 volatile uint8_t g_dacMinValue;
 volatile uint8_t g_dacMaxValue;
-volatile uint16_t g_adjustPressCount; /* Consecutive 2 ms ticks RA4 low   */
+/* ADJUST押下判定用 */
+volatile uint16_t g_adjustPressCount; 
+/* ADC変動時のLED点灯制御用 */
 volatile uint16_t g_ledTimer; /* LED on-time countdown (ticks)    */
+/* ADCの前回値 */
 volatile uint16_t g_adcPrevValue; /* Previous ADC value for LED logic */
+/* ADC実行中 */
 volatile bool g_adc_exec = false;
+/* 校正モード要求 */
 volatile bool g_adjustFlag = false; /* Set when ADJUST held >= 1 s      */
+/* ADC実行要求 */
 volatile bool g_adcStartFlag = false;
+/* ADC実行完了 */
 volatile bool g_adcDoneFlag = false;
 
 /*
@@ -121,6 +144,9 @@ static bool solid_led(uint8_t loop) {
 
 /*
  * 指定時間LEDを点滅させる
+ *  interval_loop 点滅間隔
+ *  loop ループ回数
+ *  interval_loop * loop * 100 が時間
  */
 static bool blink_led(uint8_t interval_loop, uint8_t loop) {
     bool adj_hold = true;
@@ -191,28 +217,30 @@ static bool blink_number_led(uint8_t number) {
 
 /*
  * SAFからボリューム補正値を取得する
+ *   SAFから校正値を取得した場合はLED点灯(1800msec)
+ *   SAFから校正値が取得できない場合はLED点滅(1800msec)
  */
 static void load_correction_values() {
 
-    // SAFから補正値の取得
+    // SAFから校正値の取得
     g_minVoltage = (uint16_t) FLASH_Read(SAF_ADDR_MIN);
     g_centerVoltage = (uint16_t) FLASH_Read(SAF_ADDR_CENTER);
     g_maxVoltage = (uint16_t) FLASH_Read(SAF_ADDR_MAX);
     g_dacMinValue = (uint8_t) FLASH_Read(SAF_ADDR_DAC_MIN);
     g_dacMaxValue = (uint8_t) FLASH_Read(SAF_ADDR_DAC_MAX);
 
-    /* ボリューム補正値が範囲内かチェックする */
+    /* ボリューム校正値が範囲内かチェックする */
     if (g_minVoltage < g_centerVoltage &&
             g_centerVoltage < g_maxVoltage &&
-            g_maxVoltage <= ADC_MAX &&
+            g_maxVoltage <= DEFAULT_ADC_MAX_VOL &&
             (g_maxVoltage - g_minVoltage) >= ADJUST_MIN_RANGE) {
         solid_led(6U);
     } else {
         blink_led(1U, 6U);
         // 取得値が範囲外の場合はデフォルト値を採用する
-        g_minVoltage = DEFAULT_MIN_VOL;
-        g_centerVoltage = DEFAULT_CENTER_VOL;
-        g_maxVoltage = DEFAULT_MAX_VOL;
+        g_minVoltage = DEFAULT_ADC_MIN_VOL;
+        g_centerVoltage = DEFAULT_ADC_CENTER_VOL;
+        g_maxVoltage = DEFAULT_ADC_MAX_VOL;
     }
 
     // DAC最小値チェック
@@ -236,7 +264,7 @@ static void load_correction_values() {
 }
 
 /*
- * SAFにボリューム補正値を保存する
+ * SAFにボリューム校正値を保存する
  */
 static bool save_correction_values() {
     flash_data_t buf[5];
@@ -572,7 +600,7 @@ int main(void) {
     ADC_ConversionDoneCallbackRegister(adc_isc);
     TMR0_PeriodMatchCallbackRegister(timer0_isc);
 
-    // SAFから補正値を取得する。
+    // SAFから校正値を取得する。
     load_correction_values();
 
     // 起動時のボリューム位置取得を取得してDAC出力
@@ -601,6 +629,7 @@ int main(void) {
 
         CLRWDT();
 
+        // ADC開始要求
         if (g_adcStartFlag) {
             INTERRUPT_GlobalInterruptDisable();
             ADC_ConversionStart();
@@ -608,6 +637,7 @@ int main(void) {
             INTERRUPT_GlobalInterruptEnable();
         }
 
+        // ADC終了
         if (g_adcDoneFlag) {
             INTERRUPT_GlobalInterruptDisable();
 
@@ -632,7 +662,7 @@ int main(void) {
             INTERRUPT_GlobalInterruptEnable();
         }
 
-        // 更正モード
+        // 校正モード
         if (g_adjustFlag) {
             INTERRUPT_GlobalInterruptDisable();
             adjust_mode_run();
