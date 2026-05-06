@@ -13,8 +13,8 @@ PIC16F13113 を使ったボリューム制御ファームウェアです。
 | RA1  | VREF+         | DAC/ADC 基準電圧入力         |
 | RA2  | LED           | 動作表示 LED                 |
 | RA3  | MCLR          | リセット                    |
-| RA4  | ADJUST        | 校正ボタン（内部プルアップ）  |
-| RA5  | ANA5 (ADC IN) | ボリューム電圧入力           |
+| RA4  | ANA5 (ADC IN) | ボリューム電圧入力           |
+| RA5  | ADJUST        | 校正ボタン（内部プルアップ）  |
 
 ---
 
