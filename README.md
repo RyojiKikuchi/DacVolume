@@ -108,7 +108,8 @@ RA5（ADJUST）ボタンを **1秒以上** 押し続けると校正モードへ�
 
 ## ビルド方法
 
-MPLAB X IDE でプロジェクト（`DacVolume.mc3`）を開き、Build を実行してください。
+MPLAB X IDE では、`nbproject/` を含む **DacVolume のプロジェクトフォルダ** を開き、Build を実行してください。  
+`DacVolume.mc3` は MCC の設定ファイルです。MCC の設定を確認または再生成する必要がある場合のみ、MCC から開いてください。
 
 ```
 Project > Build Project (F11)
