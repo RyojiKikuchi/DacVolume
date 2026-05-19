@@ -329,7 +329,7 @@ static uint16_t adc_exec() {
     while (!ADC_IsConversionDone()) {
         CLRWDT();
     };
-    uint16_t result = ADC_ConversionResultGet();
+    uint16_t result = (uint16_t)ADC_ConversionResultGet();
 
     ADC_ConversionDoneInterruptEnable();
 
@@ -486,9 +486,9 @@ static bool adjust_mode_adc(void) {
 
     } else if (newMax < newCenter && newCenter < newMin && (newMin - newMax) >= ADJUST_MIN_RANGE) {
         /* Valid: commit captured values to globals and persist to SAF    */
-        g_adcMinVoltage = 0xFFFFU - newMax;
-        g_adcCenterVoltage = 0xFFFFU - newCenter;
-        g_adcMaxVoltage = 0xFFFFU - newMin;
+        g_adcMinVoltage = DEFAULT_ADC_MAX_VOL - newMin;
+        g_adcCenterVoltage = DEFAULT_ADC_MAX_VOL - newCenter;
+        g_adcMaxVoltage = DEFAULT_ADC_MAX_VOL - newMax;
         g_adcReverse = 1;
         return true;
         
@@ -505,7 +505,8 @@ static uint8_t adjust_mode_dac(uint8_t current_value, uint8_t range_min, uint8_t
     blink_number_led(current_value);
     __delay_ms(1000);
     blink_number_led(current_value);
-
+    __delay_ms(1000);
+.
     uint8_t adc_value = (uint8_t) (adc_get_collection_value(adc_exec()) >> 2);
     if (adc_value < 0x55U || adc_value > 0xAAU) {
         // adcの結果が中央値以外ならここで終了
@@ -669,7 +670,7 @@ int main(void) {
             g_adcDoneFlag = false;
 
             // ADC結果を取得してDACの出力値に変換
-            uint16_t adc_value = adc_get_collection_value(ADC_ConversionResultGet());
+            uint16_t adc_value = adc_get_collection_value((uint16_t)ADC_ConversionResultGet());
             uint8_t dac_value = convert_adc_to_dac(adc_value);
 
             DAC1_SetOutput(dac_value);
