@@ -59,7 +59,6 @@
 #define SAF_ADDR_ADC_REVERSE    (SAF_ROW_ADDR + 3U)
 #define SAF_ADDR_DAC_MIN        (SAF_ROW_ADDR + 4U)
 #define SAF_ADDR_DAC_MAX        (SAF_ROW_ADDR + 5U)
-//#define SAF_ROW_SIZE            32U             /* Words per flash erase row        */
 
 /* ADC校正値がSAFに記録されていない場合のデフォルト値(10bit) */
 #define DEFAULT_ADC_MIN_VOL     0U
