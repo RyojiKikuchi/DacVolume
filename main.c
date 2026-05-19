@@ -351,21 +351,17 @@ static uint16_t adc_exec() {
 static uint8_t convert_adc_to_dac(uint16_t adcVal) {
 
     // 不感範囲判定
-    
-    if (g_status) {
+    uint16_t threshold = g_status ? NON_PERCEPTUAL_OFF_THRESHOLD : NON_PERCEPTUAL_ON_THRESHOLD;
+
+    if (adcVal < (g_adcMinVoltage + threshold)) {
         g_status = 0;
-        // ON => OFF
-        if (adcVal < (g_adcMinVoltage + NON_PERCEPTUAL_OFF_THRESHOLD)) 
-            return 0;
-        if (adcVal > (g_adcMaxVoltage - NON_PERCEPTUAL_OFF_THRESHOLD)) 
-            return g_dacMaxValue;
-    } else {
-        // OFF => ON
-        if (adcVal < (g_adcMinVoltage + NON_PERCEPTUAL_ON_THRESHOLD)) 
-            return 0;
-        if (adcVal > (g_adcMaxVoltage - NON_PERCEPTUAL_ON_THRESHOLD)) 
-            return g_dacMaxValue;
+        return 0;
     }
+    if (adcVal > (g_adcMaxVoltage - threshold)) {
+        g_status = 0;
+        return g_dacMaxValue;
+    }
+
     g_status = 1;
     
     // 上限/下限の校正値に不感範囲を反映して最大値と最小値を決定する
