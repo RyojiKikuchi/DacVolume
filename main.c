@@ -86,7 +86,8 @@
 /* ADC上限・下限から不感とする範囲
  * この範囲外の場合はDACの出力を0若しくは最大値とする
  *  */
-#define NON_PERCEPTUAL_THRESHOLD    6U
+#define NON_PERCEPTUAL_ON_THRESHOLD    6U
+#define NON_PERCEPTUAL_OFF_THRESHOLD    4U
 
 /* ADJUST校正の有効範囲: 最大-最小がこの値未満の場合はエラー */
 #define ADJUST_MIN_RANGE            512U
@@ -106,6 +107,8 @@ volatile uint8_t g_adcReverse;
 /* DAC校正値 */
 volatile uint8_t g_dacMinValue;
 volatile uint8_t g_dacMaxValue;
+/* ON/OFF */
+volatile uint8_t g_status = 0;
 /* ADJUST押下判定用 */
 volatile uint16_t g_adjustPressCount; 
 /* ADC変動時のLED点灯制御用 */
@@ -344,18 +347,36 @@ static uint16_t adc_exec() {
  */
 static uint8_t convert_adc_to_dac(uint16_t adcVal) {
 
+    // 不感範囲判定
+    
+    if (g_status) {
+        g_status = 0;
+        // ON => OFF
+        if (adcVal < (g_adcMinVoltage + NON_PERCEPTUAL_OFF_THRESHOLD)) 
+            return 0;
+        if (adcVal > (g_adcMaxVoltage - NON_PERCEPTUAL_OFF_THRESHOLD)) 
+            return g_dacMaxValue;
+    } else {
+        // OFF => ON
+        if (adcVal < (g_adcMinVoltage + NON_PERCEPTUAL_ON_THRESHOLD)) 
+            return 0;
+        if (adcVal > (g_adcMaxVoltage - NON_PERCEPTUAL_ON_THRESHOLD)) 
+            return g_dacMaxValue;
+    }
+    g_status = 1;
+    
     // 上限/下限の校正値に不感範囲を反映して最大値と最小値を決定する
-    uint16_t minVolt = g_adcMinVoltage + NON_PERCEPTUAL_THRESHOLD;
-    uint16_t maxVolt = g_adcMaxVoltage - NON_PERCEPTUAL_THRESHOLD;
+    uint16_t minVolt = g_adcMinVoltage + NON_PERCEPTUAL_ON_THRESHOLD;
+    uint16_t maxVolt = g_adcMaxVoltage - NON_PERCEPTUAL_ON_THRESHOLD;
     uint8_t dac_range = g_dacMaxValue - g_dacMinValue;
-
-    // 最小値以下はゼロ
-    if (adcVal <= minVolt)
-        return 0;
-    // 最大値超えは最大デューティー
+    
+    // 最小値未満補正
+    if (adcVal < minVolt)
+        adcVal = minVolt;
+    // 最大値超過補正
     if (adcVal > maxVolt)
-        return g_dacMaxValue;
-
+        adcVal = maxVolt;
+    
     // 電圧範囲をPWMデューティー範囲に変換
     uint16_t voltDiff = adcVal - minVolt;
     uint16_t voltRange = maxVolt - minVolt;
@@ -506,6 +527,7 @@ static uint8_t adjust_mode_dac(uint8_t current_value, uint8_t range_min, uint8_t
     __delay_ms(1000);
     blink_number_led(current_value);
     __delay_ms(1000);
+
     uint8_t adc_value = (uint8_t) (adc_get_collection_value(adc_exec()) >> 2);
     if (adc_value < 0x55U || adc_value > 0xAAU) {
         // adcの結果が中央値以外ならここで終了
