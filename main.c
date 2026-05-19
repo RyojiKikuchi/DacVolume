@@ -86,8 +86,8 @@
 /* ADC上限・下限から不感とする範囲
  * この範囲外の場合はDACの出力を0若しくは最大値とする
  *  */
-#define NON_PERCEPTUAL_ON_THRESHOLD     6U
-#define NON_PERCEPTUAL_OFF_THRESHOLD    4U
+#define NON_PERCEPTUAL_ON_THRESHOLD     5U
+#define NON_PERCEPTUAL_OFF_THRESHOLD    2U
 
 /* ADJUST校正の有効範囲: 最大-最小がこの値未満の場合はエラー */
 #define ADJUST_MIN_RANGE            512U
