@@ -312,7 +312,7 @@ static bool save_correction_values() {
  */
 static uint16_t adc_get_collection_value() {
     if (g_adcReverse) {
-        return 0xFFFFU - ADC_ConversionResultGet();
+        return DEFAULT_ADC_MAX_VOL - ADC_ConversionResultGet();
     }
     return ADC_ConversionResultGet();
 }
