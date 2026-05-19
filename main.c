@@ -506,7 +506,6 @@ static uint8_t adjust_mode_dac(uint8_t current_value, uint8_t range_min, uint8_t
     __delay_ms(1000);
     blink_number_led(current_value);
     __delay_ms(1000);
-.
     uint8_t adc_value = (uint8_t) (adc_get_collection_value(adc_exec()) >> 2);
     if (adc_value < 0x55U || adc_value > 0xAAU) {
         // adcの結果が中央値以外ならここで終了
