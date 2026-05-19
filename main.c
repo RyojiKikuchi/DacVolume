@@ -107,8 +107,11 @@ volatile uint8_t g_adcReverse;
 /* DAC校正値 */
 volatile uint8_t g_dacMinValue;
 volatile uint8_t g_dacMaxValue;
-/* ON/OFF */
-volatile uint8_t g_status = 0;
+/* Hysteresis state: 1 while output is in the perceptual/linear range,
+ * 0 while output is in the non-perceptual / saturated range.
+ */
+volatile uint8_t g_inPerceptualRange = 0;
+#define g_status g_inPerceptualRange
 /* ADJUST押下判定用 */
 volatile uint16_t g_adjustPressCount; 
 /* ADC変動時のLED点灯制御用 */
