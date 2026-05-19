@@ -484,7 +484,7 @@ static bool adjust_mode_adc(void) {
         g_adcReverse = 0;
         return true;
 
-    } else if (newMax < newCenter && newCenter < newMin && (newMin -newMax) >= ADJUST_MIN_RANGE) {
+    } else if (newMax < newCenter && newCenter < newMin && (newMin - newMax) >= ADJUST_MIN_RANGE) {
         /* Valid: commit captured values to globals and persist to SAF    */
         g_adcMinVoltage = 0xFFFFU - newMax;
         g_adcCenterVoltage = 0xFFFFU - newCenter;
