@@ -309,11 +309,11 @@ static bool save_correction_values() {
  * ADC結果の取得
  * ADC補正値反映結果を返却
  */
-static uint16_t adc_get_collection_value() {
+static uint16_t adc_get_collection_value(uint16_t rawValue) {
     if (g_adcReverse) {
-        return DEFAULT_ADC_MAX_VOL - ADC_ConversionResultGet();
+        return DEFAULT_ADC_MAX_VOL - rawValue;
     }
-    return ADC_ConversionResultGet();
+    return rawValue;
 }
 
 /* 
@@ -506,8 +506,7 @@ static uint8_t adjust_mode_dac(uint8_t current_value, uint8_t range_min, uint8_t
     __delay_ms(1000);
     blink_number_led(current_value);
 
-    adc_exec();
-    uint8_t adc_value = (uint8_t) (adc_get_collection_value() >> 2);
+    uint8_t adc_value = (uint8_t) (adc_get_collection_value(adc_exec()) >> 2);
     if (adc_value < 0x55U || adc_value > 0xAAU) {
         // adcの結果が中央値以外ならここで終了
 
@@ -530,8 +529,7 @@ static uint8_t adjust_mode_dac(uint8_t current_value, uint8_t range_min, uint8_t
         }
 
         // adc結果取得
-        adc_exec();
-        adc_value = (uint8_t) (adc_get_collection_value() >> 2);
+        adc_value = (uint8_t) (adc_get_collection_value(adc_exec()) >> 2);
         if (adc_value < 0x55U) {
             // デクリメント
             if (new_value > range_min) {
@@ -591,7 +589,7 @@ static void adjust_mode_run(void) {
     IO_RA2_SetLow();
 
     // 現在のボリューム位置を取得してどのモードに入るか決定する
-    uint8_t adc_value = (uint8_t) (adc_exec() >> 2);
+    uint8_t adc_value = (uint8_t) (adc_get_collection_value(adc_exec()) >> 2);
     bool is_save = false;
     if (adc_value <= 0x55U) {
 
@@ -637,8 +635,7 @@ int main(void) {
     load_correction_values();
 
     // 起動時のボリューム位置取得を取得してDAC出力
-    adc_exec();
-    g_adcPrevValue = adc_get_collection_value();
+    g_adcPrevValue = adc_get_collection_value(adc_exec());
     set_dac_value_fade(convert_adc_to_dac(g_adcPrevValue));
 
     // Enable the Global Interrupts 
@@ -672,7 +669,7 @@ int main(void) {
             g_adcDoneFlag = false;
 
             // ADC結果を取得してDACの出力値に変換
-            uint16_t adc_value = adc_get_collection_value();
+            uint16_t adc_value = adc_get_collection_value(ADC_ConversionResultGet());
             uint8_t dac_value = convert_adc_to_dac(adc_value);
 
             DAC1_SetOutput(dac_value);
