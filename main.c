@@ -86,7 +86,7 @@
 /* ADC上限・下限から不感とする範囲
  * この範囲外の場合はDACの出力を0若しくは最大値とする
  *  */
-#define NON_PERCEPTUAL_ON_THRESHOLD    6U
+#define NON_PERCEPTUAL_ON_THRESHOLD     6U
 #define NON_PERCEPTUAL_OFF_THRESHOLD    4U
 
 /* ADJUST校正の有効範囲: 最大-最小がこの値未満の場合はエラー */
@@ -111,7 +111,6 @@ volatile uint8_t g_dacMaxValue;
  * 0 while output is in the non-perceptual / saturated range.
  */
 volatile uint8_t g_inPerceptualRange = 0;
-#define g_status g_inPerceptualRange
 /* ADJUST押下判定用 */
 volatile uint16_t g_adjustPressCount; 
 /* ADC変動時のLED点灯制御用 */
@@ -351,18 +350,18 @@ static uint16_t adc_exec() {
 static uint8_t convert_adc_to_dac(uint16_t adcVal) {
 
     // 不感範囲判定
-    uint16_t threshold = g_status ? NON_PERCEPTUAL_OFF_THRESHOLD : NON_PERCEPTUAL_ON_THRESHOLD;
+    uint16_t threshold = g_inPerceptualRange ? NON_PERCEPTUAL_OFF_THRESHOLD : NON_PERCEPTUAL_ON_THRESHOLD;
 
     if (adcVal < (g_adcMinVoltage + threshold)) {
-        g_status = 0;
+        g_inPerceptualRange = 0;
         return 0;
     }
     if (adcVal > (g_adcMaxVoltage - threshold)) {
-        g_status = 0;
+        g_inPerceptualRange = 0;
         return g_dacMaxValue;
     }
 
-    g_status = 1;
+    g_inPerceptualRange = 1;
     
     // 上限/下限の校正値に不感範囲を反映して最大値と最小値を決定する
     uint16_t minVolt = g_adcMinVoltage + NON_PERCEPTUAL_ON_THRESHOLD;
