@@ -121,7 +121,7 @@ nvm_status_t FLASH_RowWrite(flash_address_t address, flash_data_t *dataBuffer, u
         NVMADRL = (uint8_t) (address & 0xFFU);
         address++;
         
-        word_data = (write_count < length) ? dataBuffer[write_count] : 0x3FFU;
+        word_data = (write_count < length) ? dataBuffer[write_count] : 0x3FFFU;
         NVMDATH = (uint8_t) (word_data >> 8);
         NVMDATL = (uint8_t) (word_data & 0xFFU);
         write_count++;
